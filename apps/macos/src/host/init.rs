@@ -123,6 +123,8 @@ pub fn init(mtm: MainThreadMarker, info: &BundleInfo) -> Result<(), HostError> {
             engine,
             window,
             indicator,
+            english_mode: false,
+            shift_tap: ShiftTap::default(),
             menu,
             preferences,
             settings,

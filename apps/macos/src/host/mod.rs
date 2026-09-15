@@ -50,6 +50,7 @@ use crate::app::BundleInfo;
 use crate::app::{Settings, logging, paths};
 use crate::candidates::{CandidateWindow, Frame, Preedit, Row};
 use crate::error::HostError;
+use crate::imk::modifiers::ShiftTap;
 use crate::menubar::{InputMenu, MenuAction, ModeIndicator};
 use crate::preferences::{PreferencesWindow, Setting, SettingValue};
 
@@ -71,6 +72,12 @@ pub struct Host {
 
     /// 菜单栏的中 / 英状态项。
     pub indicator: ModeIndicator,
+
+    /// 当前是否为英文模式；单击 Shift 切换。
+    pub english_mode: bool,
+
+    /// 区分单击 Shift 与 Shift + 其他键。
+    pub shift_tap: ShiftTap,
 
     /// 输入法菜单，挂在状态项和系统输入源菜单上。
     pub menu: InputMenu,
