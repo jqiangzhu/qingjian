@@ -6,8 +6,8 @@
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu};
-use objc2_foundation::NSObjectProtocol;
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu};
+use objc2_foundation::{NSObjectProtocol, NSUInteger};
 use objc2_input_method_kit::{IMKInputController, IMKServer};
 use qingjian_core::{Candidate, QUESTION_PREFIX};
 use qingjian_platform::Modifiers;
@@ -62,6 +62,12 @@ define_class!(
             }
         }
 
+        /// IMK 默认只送 KeyDown；单击 Shift 需要显式声明接收 FlagsChanged。
+        #[unsafe(method(recognizedEvents:))]
+        fn recognized_events(&self, _sender: Option<&AnyObject>) -> NSUInteger {
+            (NSEventMask::KeyDown | NSEventMask::FlagsChanged).bits() as NSUInteger
+        }
+
         /// 应用要求立刻结束本次输入（切换焦点、切换输入法等）。
         #[unsafe(method(commitComposition:))]
         fn commit_composition(&self, client: Option<&AnyObject>) {
@@ -92,7 +98,8 @@ define_class!(
                 host::with(|h| {
                     h.engine.set_application(bundle);
                     h.reload_config_if_changed();
-                    h.indicator.activate();
+                    let english = h.english_mode;
+                    h.indicator.activate(english);
                     h.watch.start();
                 });
             });
@@ -172,10 +179,14 @@ fn digit_key(key_code: u16) -> Option<usize> {
 }
 
 impl QingjianInputController {
-    /// 一个按键事件的分发：只管按下；Cmd / Ctrl 组合除 Cmd+左右外一律交给应用；命令键映射成选择器；其余按字符当文本。
+    /// 一个按键事件的分发：修饰键变化先识别单击 Shift；Cmd / Ctrl 组合除 Cmd+左右外一律交给应用；命令键映射成选择器；其余按字符当文本。
     fn dispatch_event(&self, event: &NSEvent, client: TextClient<'_>) -> bool {
-        if event.r#type() != NSEventType::KeyDown {
-            return false;
+        match event.r#type() {
+            NSEventType::FlagsChanged => return self.handle_modifier_event(event, client),
+            NSEventType::KeyDown => {
+                host::with(|h| h.shift_tap.note_key_down());
+            }
+            _ => return false,
         }
         let flags = event.modifierFlags();
         let (command, control, option, shift) = (
@@ -263,6 +274,46 @@ impl QingjianInputController {
             Some(text) if !text.is_empty() => self.handle_text(&text.to_string(), client),
             _ => false,
         }
+    }
+
+    /// 单独按下并松开 Shift 切换中 / 英；与字母或其他修饰键组合时不切换。
+    fn handle_modifier_event(&self, event: &NSEvent, client: TextClient<'_>) -> bool {
+        let flags = event.modifierFlags();
+        let shift = flags.contains(NSEventModifierFlags::Shift);
+        let other = flags.intersects(
+            NSEventModifierFlags::Command
+                | NSEventModifierFlags::Control
+                | NSEventModifierFlags::Option,
+        );
+        let tapped = host::with(|h| h.shift_tap.flags_changed(event.keyCode(), shift, other))
+            .unwrap_or(false);
+        if !tapped {
+            return false;
+        }
+        let bundle = client.bundle_identifier();
+        let (composing, passthrough) = host::with(|h| {
+            h.clear_notice();
+            h.english_mode = !h.english_mode;
+            let english = h.english_mode;
+            let question = h.engine.question_mode();
+            let english_candidates = h.english_candidates_in(bundle.as_deref());
+            let passthrough = english && !question && !english_candidates;
+            h.engine
+                .set_english_mode(english && !question && english_candidates);
+            h.indicator.update(english);
+            let mode = if english { "英" } else { "中" };
+            tracing::info!(mode, "单击 Shift 切换模式");
+            (!h.engine.composition().is_empty(), passthrough)
+        })
+        .unwrap_or((false, false));
+        if composing {
+            if passthrough {
+                self.commit_raw(client);
+            } else {
+                self.refresh(client);
+            }
+        }
+        true
     }
 
     /// Option+数字：上屏当前页第几个候选的译文（学习和拼音消耗与选那个候选一样）。
@@ -378,12 +429,13 @@ impl QingjianInputController {
         tracing::debug!(%text, "inputText");
         self.note_application(&client);
         let mut composing = host::with(|h| !h.engine.composition().is_empty()).unwrap_or(false);
-        let english = modifiers::caps_lock_on();
+        let english = host::with(|h| h.english_mode).unwrap_or(false);
+        let caps_lock = modifiers::caps_lock_on();
         // 终端、编辑器这类应用（`[apps] english_candidates_off`）里英文模式是纯直通
         let english_candidates = english
             && host::with(|h| h.english_candidates_in(client.bundle_identifier().as_deref()))
                 .unwrap_or(false);
-        // 英文模式组词中 Caps Lock 灭了（或开关关了）：敲的字母先原样上屏，别把它们当拼音
+        // 英文模式组词中切回中文（或英文候选开关关了）：敲的字母先原样上屏，别把它们当拼音
         if composing
             && !english_candidates
             && host::with(|h| h.engine.english_mode()).unwrap_or(false)
@@ -403,7 +455,10 @@ impl QingjianInputController {
             return false;
         };
         let c = char::from(*byte);
-        host::with(|h| h.indicator.update());
+        host::with(|h| {
+            let english = h.english_mode;
+            h.indicator.update(english);
+        });
         // 缓冲区为空时敲 ? 先进问字模式（配置 `[shortcut] question_mark`，缺省关），中英文模式都行：
         // 后面跟字母就是在问字，跟别的键就还原成问号
         if !composing
@@ -415,21 +470,16 @@ impl QingjianInputController {
             return true;
         }
         let question = composing && host::with(|h| h.engine.question_mode()).unwrap_or(false);
-        // 英文模式下问字：Caps Lock 让字母以大写送来，按小写收进问题
-        let c = if question && english && c.is_ascii_uppercase() {
+        // 问字模式按小写收字母，不让 Caps Lock / Shift 改变查询串。
+        let c = if question && c.is_ascii_uppercase() {
             c.to_ascii_lowercase()
         } else {
             c
         };
         host::with(|h| h.engine.set_english_mode(english_candidates && !question));
-        // Caps Lock 亮着 = 英文模式：不组句、不转标点，字母默认小写、按住 Shift 才大写
+        // 英文模式不组中文句、不转全角标点；Caps Lock 只管字母大小写。
         if english && !question {
-            // Caps Lock 亮着时 macOS 不管按没按 Shift 送来的都是大写，只能读 Shift 状态：按着才大写
-            let letter = if modifiers::shift_down() {
-                c.to_ascii_uppercase()
-            } else {
-                c.to_ascii_lowercase()
-            };
+            let letter = modifiers::english_letter(c, caps_lock, modifiers::shift_down());
             if !english_candidates {
                 if composing {
                     self.commit_raw(client);
@@ -712,7 +762,7 @@ impl QingjianInputController {
     /// 缓冲区里只有一个 `?` 而用户按了别的键：把它还原成问号上屏（中文遵循标点设置、英文半角）、清空缓冲区。
     /// 返回是否发生了还原。
     fn restore_bare_question(&self, client: TextClient<'_>) -> bool {
-        let english = modifiers::caps_lock_on();
+        let english = host::with(|h| h.english_mode).unwrap_or(false);
         let restored = host::with(|h| {
             let mark = h.engine.restore_bare_question(english)?;
             h.cancel_prediction();
