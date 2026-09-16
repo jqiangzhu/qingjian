@@ -37,7 +37,6 @@ https://github.com/user-attachments/assets/d145fde9-a641-4543-8b15-dd7a2685de3d
 ## 本分支修改内容
 
 - 将 macOS 版的中英文切换从 `Caps Lock` 改为单击 `Shift`。
-- 增加对 `Shift` 按下和松开事件的接收与判断。
 - 区分单击 `Shift` 和 `Shift + 其他键`，避免组合键误切换。
 - 让菜单栏的「中 / 英」状态跟随切换结果更新。
 - 将 `Caps Lock` 改为只控制英文字母大小写。
