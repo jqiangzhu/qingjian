@@ -249,8 +249,10 @@ impl QingjianInputController {
             124 => Some(sel!(moveRight:)),
             116 => Some(sel!(pageUp:)),
             121 => Some(sel!(pageDown:)),
-            115 => Some(sel!(moveToBeginningOfLine:)),
-            119 => Some(sel!(moveToEndOfLine:)),
+            // 导航区左列：上面 Home 翻下一页，下面 End 翻上一页。
+            // 没在组词时会返回 false，应用仍收到原本的 Home / End 按键。
+            115 => Some(sel!(pageDown:)),
+            119 => Some(sel!(pageUp:)),
             _ => None,
         };
         if let Some(selector) = selector {
